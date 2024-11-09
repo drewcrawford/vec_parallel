@@ -1,0 +1,9 @@
+[package]
+name = "vec_parallel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[dev-dependencies]
+test_executors = "0.2.0"

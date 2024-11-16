@@ -12,16 +12,17 @@ enum Strategy {
     One
 }
 
-struct SliceTask<T,B> {
+struct SliceTask<'a, T,B: BuildFn<T> + 'a> {
     ///A function that builds the value.
     build: B,
     ///An arc that ensures the slice is not deallocated.
     own: Arc<Vec<MaybeUninit<T>>>,
-    start: *const MaybeUninit<T>,
+    start: *mut MaybeUninit<T>,
     len: usize,
+    pending: Option<<B as BuildFn<T>> ::BuildFut<'a>>,
 }
 
-impl<T,B> Future for SliceTask<T,B> {
+impl<'a, T,B: BuildFn<T>> Future for SliceTask<'a, T,B> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -75,11 +76,11 @@ impl<I> Future for VecResult<I> {
     }
 }
 
-struct VecBuilder<I: 'static,B> {
-    tasks: Vec<SliceTask<I,B>>,
+struct VecBuilder<'a, I: 'static,B: BuildFn<I>> {
+    tasks: Vec<SliceTask<'a, I,B>>,
     result: VecResult<I>,
 }
-pub fn build_vec<R,B>(len: usize, strategy: Strategy, f: B) -> VecBuilder<R,B> {
+pub fn build_vec<'a, R,B: BuildFn<R>>(len: usize, strategy: Strategy, f: B) -> VecBuilder<'a, R,B> {
     let mut vec = Vec::with_capacity(len);
     let start = vec.as_mut_ptr();
     let vec_arc = Arc::new(vec);
@@ -90,6 +91,7 @@ pub fn build_vec<R,B>(len: usize, strategy: Strategy, f: B) -> VecBuilder<R,B> {
                 own: vec_arc,
                 start,
                 len,
+                pending: None,
             };
             let result = VecResult {phantom_data: PhantomData};
             VecBuilder {
@@ -109,6 +111,6 @@ pub fn build_vec<R,B>(len: usize, strategy: Strategy, f: B) -> VecBuilder<R,B> {
         for task in builder.tasks {
             test_executors::spin_on(task);
         }
-        test_executors::spin_on::<VecResult<i32>>(builder.result);
+        test_executors::spin_on::<VecResult<_>>(builder.result);
     }
 }

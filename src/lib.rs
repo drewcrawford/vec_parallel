@@ -11,7 +11,11 @@ enum Strategy {
     /**
     Create a single task.
     */
-    One
+    One,
+    /**
+    Creates the number of tasks specified.
+*/
+    Tasks(usize),
 }
 
 struct SharedWaker {
@@ -101,8 +105,12 @@ struct VecBuilder<I, B> {
     tasks: Vec<SliceTask<I, B>>,
     result: VecResult<I>,
 }
-pub fn build_vec<'a, R, B: FnMut(usize) -> R>(len: usize, strategy: Strategy, f: B) -> VecBuilder<R, B> {
+pub fn build_vec<'a, R, B>(len: usize, strategy: Strategy, f: B) -> VecBuilder<R, B>
+where B: FnMut(usize) -> R,
+B: Clone {
     let mut vec = Vec::with_capacity(len);
+    vec.resize_with(len, MaybeUninit::uninit);
+
     let vec_base = vec.as_mut_ptr();
     let vec_arc = Arc::new(vec);
     match strategy {
@@ -125,6 +133,32 @@ pub fn build_vec<'a, R, B: FnMut(usize) -> R>(len: usize, strategy: Strategy, f:
                 result,
             }
         }
+        Strategy::Tasks(tasks) => {
+            let shared_waker = Arc::new(SharedWaker {
+                outstanding_tasks: AtomicUsize::new(tasks),
+                waker: AtomicWaker::new(),
+            });
+            let mut task_vec = Vec::with_capacity(tasks);
+            let chunk = len / tasks;
+            for i in 0..tasks {
+                let start = i * chunk;
+                let end = if i + 1 == tasks { len } else { start + chunk };
+                let task = SliceTask {
+                    build: f.clone(),
+                    own: vec_arc.clone(),
+                    vec_base,
+                    start,
+                    past_end: end,
+                    shared_waker: shared_waker.clone(),
+                };
+                task_vec.push(task);
+            }
+            let result = VecResult { vec: Some(vec_arc), shared_waker };
+            VecBuilder {
+                tasks: task_vec,
+                result,
+            }
+        }
     }
 }
 
@@ -138,6 +172,29 @@ mod tests {
         for task in builder.tasks {
             test_executors::spin_on(task);
         }
-        test_executors::spin_on::<VecResult<_>>(builder.result);
+        let o = test_executors::spin_on::<VecResult<_>>(builder.result);
+        assert_eq!(o, (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_build_vec_tasks() {
+        let builder = super::build_vec(10, super::Strategy::Tasks(2), |i: usize| i);
+        assert_eq!(builder.tasks.len(), 2);
+        assert_eq!(builder.tasks[0].start, 0);
+        assert_eq!(builder.tasks[0].past_end, 5);
+        assert_eq!(builder.tasks[1].start, 5);
+        assert_eq!(builder.tasks[1].past_end, 10);
+    }
+
+    #[test]
+    fn test_build_vec_tasks_11() {
+        let builder = super::build_vec(13, super::Strategy::Tasks(3), |i: usize| i);
+        assert_eq!(builder.tasks.len(), 3);
+        assert_eq!(builder.tasks[0].start, 0);
+        assert_eq!(builder.tasks[0].past_end,4);
+        assert_eq!(builder.tasks[1].start, 4);
+        assert_eq!(builder.tasks[1].past_end, 8);
+        assert_eq!(builder.tasks[2].start, 8);
+        assert_eq!(builder.tasks[2].past_end, 13);
     }
 }

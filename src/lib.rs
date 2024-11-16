@@ -12,16 +12,16 @@ enum Strategy {
     One
 }
 
-struct SliceTask<'a,T,B> {
-    ///The slice to be written to.
-    slice: &'a mut [MaybeUninit<T>],
+struct SliceTask<T,B> {
     ///A function that builds the value.
     build: B,
     ///An arc that ensures the slice is not deallocated.
     own: Arc<Vec<MaybeUninit<T>>>,
+    start: *const MaybeUninit<T>,
+    len: usize,
 }
 
-impl<'a,T,B> Future for SliceTask<'a,T,B> {
+impl<T,B> Future for SliceTask<T,B> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -72,19 +72,20 @@ impl<I> Future for VecResult<I> {
 }
 
 struct VecBuilder<I: 'static,B> {
-    tasks: Vec<SliceTask<'static, I,B>>,
+    tasks: Vec<SliceTask<I,B>>,
     result: VecResult<I>,
 }
 pub fn build_vec<R,B>(len: usize, strategy: Strategy, f: B) -> VecBuilder<R,B> {
     let mut vec = Vec::with_capacity(len);
-    let dangerous_slice = unsafe{std::slice::from_raw_parts_mut(vec.as_mut_ptr() as *mut MaybeUninit<R>, len)};
+    let start = vec.as_mut_ptr();
     let vec_arc = Arc::new(vec);
     match strategy {
         Strategy::One => {
             let task = SliceTask {
-                slice: dangerous_slice,
                 build: f,
                 own: vec_arc,
+                start,
+                len,
             };
             let result = VecResult {phantom_data: PhantomData};
             VecBuilder {

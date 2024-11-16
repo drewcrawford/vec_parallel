@@ -30,8 +30,8 @@ impl<T,B> Future for SliceTask<T,B> {
 }
 
 trait BuildFn<T> {
-
-    fn build<'a>(&'a mut self, index: usize) -> impl Future<Output=T> + 'a;
+    type BuildFut<'a>: Future<Output=T> where Self: 'a;
+    fn build<'a>(&'a mut self, index: usize) -> Self::BuildFut<'a> where Self: 'a;
 }
 
 struct RunFnFuture<'a, F> {
@@ -48,9 +48,13 @@ impl <F,R> Future for RunFnFuture<'_,F> where F: FnMut(usize) -> R {
     }
 }
 
-impl<'a, R,F> BuildFn<R> for F where F: FnMut(usize) -> R + 'a, Self: 'a {
+impl<R,F> BuildFn<R> for F where F: FnMut(usize) -> R {
 
-    fn build(&mut self, index: usize) -> RunFnFuture<F> {
+    type BuildFut<'a> = RunFnFuture<'a,F> where F:'a ;
+    fn build<'a>(&'a mut self, index: usize) -> Self::BuildFut<'a>
+    where
+        Self: 'a,
+    {
         RunFnFuture {
             f: self,
             index,

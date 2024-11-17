@@ -16,6 +16,11 @@ enum Strategy {
     Creates the number of tasks specified.
 */
     Tasks(usize),
+    /**
+    Creates a maximum number of tasks.
+    */
+    Max,
+
 }
 
 struct SharedWaker {
@@ -159,6 +164,29 @@ B: Clone {
                 result,
             }
         }
+        Strategy::Max => {
+            let shared_waker = Arc::new(SharedWaker {
+                outstanding_tasks: AtomicUsize::new(len),
+                waker: AtomicWaker::new(),
+            });
+            let mut task_vec = Vec::with_capacity(len);
+            for i in 0..len {
+                let task = SliceTask {
+                    build: f.clone(),
+                    own: vec_arc.clone(),
+                    vec_base,
+                    start: i,
+                    past_end: i + 1,
+                    shared_waker: shared_waker.clone(),
+                };
+                task_vec.push(task);
+            }
+            let result = VecResult { vec: Some(vec_arc), shared_waker };
+            VecBuilder {
+                tasks: task_vec,
+                result,
+            }
+        }
     }
 }
 
@@ -196,5 +224,30 @@ mod tests {
         assert_eq!(builder.tasks[1].past_end, 8);
         assert_eq!(builder.tasks[2].start, 8);
         assert_eq!(builder.tasks[2].past_end, 13);
+    }
+
+    #[test] fn test_build_vec_tasks_103() {
+        let builder = super::build_vec(103, super::Strategy::Tasks(3), |i: usize| i);
+        assert_eq!(builder.tasks.len(), 3);
+        assert_eq!(builder.tasks[0].start, 0);
+        assert_eq!(builder.tasks[0].past_end, 34);
+        assert_eq!(builder.tasks[1].start, 34);
+        assert_eq!(builder.tasks[1].past_end, 68);
+        assert_eq!(builder.tasks[2].start, 68);
+        assert_eq!(builder.tasks[2].past_end, 103);
+    }
+
+    #[test]
+    fn test_max() {
+        let builder = super::build_vec(10, super::Strategy::Max, |i: usize| i);
+        assert_eq!(builder.tasks.len(), 10);
+        let mut start = 0;
+        for task in builder.tasks {
+            assert_eq!(task.start, start);
+            assert_eq!(task.past_end, start + 1);
+            start += 1;
+        }
+
+
     }
 }

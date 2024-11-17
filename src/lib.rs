@@ -1,3 +1,7 @@
+/*!
+This library provides a way to build a vector in parallel.
+*/
+
 use std::future::Future;
 use std::mem::MaybeUninit;
 use std::pin::Pin;
@@ -6,6 +10,8 @@ use std::sync::atomic::AtomicUsize;
 use std::task::{Context, Poll};
 use atomic_waker::AtomicWaker;
 
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash)]
+#[non_exhaustive]
 pub enum Strategy {
     /**
     Create a single task.
@@ -25,11 +31,14 @@ pub enum Strategy {
     Creates a number of tasks multiplied by the core count of the system.
 
     This is useful for CPU-bound tasks.  Generally speaking, values of 5-15 provide good performance.
+
+    If the number of tasks is greater than the number of elements, the number of tasks is reduced to the number of elements.
     */
     TasksPerCore(usize),
 
 }
 
+#[derive(Debug)]
 struct SharedWaker {
     outstanding_tasks: AtomicUsize,
     waker: AtomicWaker,
@@ -37,7 +46,9 @@ struct SharedWaker {
 
 
 
-struct SliceTask<T, B> {
+#[derive(Debug)]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct SliceTask<T, B> {
     ///A function that builds the value.
     build: B,
     ///An arc that ensures the slice is not deallocated.
@@ -46,21 +57,42 @@ struct SliceTask<T, B> {
     start: usize,
     past_end: usize,
     shared_waker: Arc<SharedWaker>,
+    poison: bool,
 }
 
-impl<'a, T, B> Future for SliceTask<T, B> where B: FnMut(usize) -> T {
+unsafe impl<T,B> Send for SliceTask<T,B> where T: Send, B: Send {}
+
+impl <T,B> SliceTask<T,B> where B: FnMut(usize) -> T {
+    pub fn run(&mut self) {
+        assert!(!self.poison, "Polling after completion");
+        for i in self.start..self.past_end {
+            unsafe {
+                let ptr = self.vec_base.add(i);
+                ptr.write(MaybeUninit::new((self.build)(i)));
+            }
+        }
+        let old = self.shared_waker.outstanding_tasks.fetch_sub(1, std::sync::atomic::Ordering::Release);
+        if old == 1 {
+            self.shared_waker.waker.wake();
+        }
+        self.poison = true;
+    }
+}
+
+impl<T, B> Future for SliceTask<T, B> where B: FnMut(usize) -> T {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        assert!(!self.poison, "Polling after completion");
         //pin-project
-        let (start, past_end, build, vec_base, shared_waker) = unsafe {
+        let (start, past_end, build, vec_base, shared_waker,poison) = unsafe {
             let s = self.get_unchecked_mut();
             let start = &mut s.start;
             let past_end = &mut s.past_end;
             let build = &mut s.build;
             let vec_base = &mut s.vec_base;
             let shared_waker = &mut s.shared_waker;
-            (start, past_end, build, vec_base, shared_waker)
+            (start, past_end, build, vec_base, shared_waker, &mut s.poison)
         };
         for i in *start..*past_end {
             unsafe {
@@ -72,6 +104,7 @@ impl<'a, T, B> Future for SliceTask<T, B> where B: FnMut(usize) -> T {
         if old == 1 {
             shared_waker.waker.wake();
         }
+        *poison = true;
         Poll::Ready(())
     }
 }
@@ -79,9 +112,13 @@ impl<'a, T, B> Future for SliceTask<T, B> where B: FnMut(usize) -> T {
 
 
 
+/**
+Represents the overall result, or the final vector.
+*/
 
-
-struct VecResult<I> {
+#[derive(Debug)]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct VecResult<I> {
     vec: Option<Arc<Vec<MaybeUninit<I>>>>,
     shared_waker: Arc<SharedWaker>,
 }
@@ -113,10 +150,29 @@ impl<I> Future for VecResult<I> {
     }
 }
 
+
+
 pub struct VecBuilder<I, B> {
-    tasks: Vec<SliceTask<I, B>>,
-    result: VecResult<I>,
+    pub tasks: Vec<SliceTask<I, B>>,
+    pub result: VecResult<I>,
 }
+
+/**
+Builds a vector in parallel.
+
+# Example
+```
+use vec_parallel::*;
+let builder = build_vec(10, vec_parallel::Strategy::Max, |i: usize| i);
+//run the invididual tasks.  Pro tip, these can be dispatched in parallel.
+for task in builder.tasks {
+    test_executors::spin_on(task);
+}
+//wait for the result
+let o = test_executors::spin_on(builder.result);
+assert_eq!(o, (0..10).collect::<Vec<_>>());
+```
+*/
 pub fn build_vec<'a, R, B>(len: usize, strategy: Strategy, f: B) -> VecBuilder<R, B>
 where B: FnMut(usize) -> R,
 B: Clone {
@@ -149,6 +205,7 @@ B: Clone {
                     start,
                     past_end: end,
                     shared_waker: shared_waker.clone(),
+                    poison: false,
                 };
                 task_vec.push(task);
             }
@@ -168,9 +225,30 @@ B: Clone {
     }
 }
 
+//boilerplates
+
+impl<T,B> PartialEq for SliceTask<T,B> {
+    fn eq(&self, other: &Self) -> bool {
+        self.start == other.start && self.past_end == other.past_end && Arc::ptr_eq(&self._own, &other._own)
+    }
+}
+
+impl<T,B> Eq for SliceTask<T,B> {}
+
+impl<T,B> std::hash::Hash for SliceTask<T,B> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.start.hash(state);
+        self.past_end.hash(state);
+        Arc::as_ptr(&self._own).hash(state);
+    }
+}
+//asref/asmut - sort of hard to implement safely to avoid double-muts.
+
+
+
 #[cfg(test)]
 mod tests {
-    use crate::VecResult;
+    use crate::{VecResult};
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
@@ -261,6 +339,22 @@ mod tests {
             assert!(task.past_end > start);
             start = task.past_end;
         }
+    }
+
+    #[test]
+    fn test_send() {
+        fn is_send<T: Send>(_t: &T) {}
+        fn is_static<T: 'static>(_t: &T) {}
+
+        let mut builder = super::build_vec(1000, super::Strategy::TasksPerCore(2), |i: usize| i);
+        let a_task = builder.tasks.remove(0);
+
+        is_send(&a_task);
+        is_static(&a_task);
+
+        let a_result = builder.result;
+        is_send(&a_result);
+        is_static(&a_result);
     }
 
 

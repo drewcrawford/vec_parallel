@@ -1,5 +1,5 @@
 /*!
-This library provides a way to build a vector in parallel.
+Provides a way to build a vector in parallel.
 */
 
 use std::future::Future;
@@ -151,10 +151,45 @@ impl<I> Future for VecResult<I> {
 }
 
 
-
+/**
+Represents an entire vector build.
+*/
 pub struct VecBuilder<I, B> {
+    ///The individual tasks.
     pub tasks: Vec<SliceTask<I, B>>,
+    ///The final result.
     pub result: VecResult<I>,
+}
+
+#[cfg(feature = "some_executor")]
+impl <I,B> VecBuilder<I,B> {
+    /**
+    Spawns the tasks on the executor.
+
+    The result future is executed on the current task.
+*/
+    pub async fn spawn_on<E: some_executor::SomeExecutor>(mut self, executor: &mut E, priority: some_executor::Priority, hint: some_executor::hint::Hint) -> Vec<I>
+    where I: Send,
+    B: FnMut(usize) -> I,
+    B: Send,
+    I: 'static,
+    B: 'static, {
+        use some_executor::task::{ConfigurationBuilder,Task};
+
+        let configuration = ConfigurationBuilder::new()
+            .priority(priority)
+            .hint(hint)
+            .build();
+
+        let mut observers = Vec::with_capacity(self.tasks.len());
+        for (t,task) in self.tasks.drain(..).enumerate() {
+            let label = format!("VecBuilder task {}",t);
+            let t = Task::without_notifications(label, task, configuration.clone());
+            let o = executor.spawn(t);
+            observers.push(o);
+        }
+        self.result.await
+    }
 }
 
 /**

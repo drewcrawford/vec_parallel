@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -7,7 +6,7 @@ use std::sync::atomic::AtomicUsize;
 use std::task::{Context, Poll};
 use atomic_waker::AtomicWaker;
 
-enum Strategy {
+pub enum Strategy {
     /**
     Create a single task.
     */
@@ -20,6 +19,12 @@ enum Strategy {
     Creates a maximum number of tasks.
     */
     Max,
+    /**
+    Creates a number of tasks multiplied by the core count of the system.
+
+    This is useful for CPU-bound tasks.  Generally speaking, values of 5-15 provide good performance.
+    */
+    TasksPerCore(usize),
 
 }
 
@@ -34,7 +39,7 @@ struct SliceTask<T, B> {
     ///A function that builds the value.
     build: B,
     ///An arc that ensures the slice is not deallocated.
-    own: Arc<Vec<MaybeUninit<T>>>,
+    _own: Arc<Vec<MaybeUninit<T>>>,
     vec_base: *mut MaybeUninit<T>,
     start: usize,
     past_end: usize,
@@ -44,9 +49,9 @@ struct SliceTask<T, B> {
 impl<'a, T, B> Future for SliceTask<T, B> where B: FnMut(usize) -> T {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         //pin-project
-        let (start, past_end, mut build, vec_base, shared_waker) = unsafe {
+        let (start, past_end, build, vec_base, shared_waker) = unsafe {
             let s = self.get_unchecked_mut();
             let start = &mut s.start;
             let past_end = &mut s.past_end;
@@ -106,7 +111,7 @@ impl<I> Future for VecResult<I> {
     }
 }
 
-struct VecBuilder<I, B> {
+pub struct VecBuilder<I, B> {
     tasks: Vec<SliceTask<I, B>>,
     result: VecResult<I>,
 }
@@ -120,23 +125,7 @@ B: Clone {
     let vec_arc = Arc::new(vec);
     match strategy {
         Strategy::One => {
-            let shared_waker = Arc::new(SharedWaker {
-                outstanding_tasks: AtomicUsize::new(1),
-                waker: AtomicWaker::new(),
-            });
-            let task = SliceTask {
-                build: f,
-                own: vec_arc.clone(),
-                vec_base,
-                start: 0,
-                past_end: len,
-                shared_waker: shared_waker.clone(),
-            };
-            let result = VecResult { vec: Some(vec_arc), shared_waker };
-            VecBuilder {
-                tasks: vec![task],
-                result,
-            }
+            build_vec(len, Strategy::Tasks(1), f)
         }
         Strategy::Tasks(tasks) => {
             let shared_waker = Arc::new(SharedWaker {
@@ -150,7 +139,7 @@ B: Clone {
                 let end = if i + 1 == tasks { len } else { start + chunk };
                 let task = SliceTask {
                     build: f.clone(),
-                    own: vec_arc.clone(),
+                    _own: vec_arc.clone(),
                     vec_base,
                     start,
                     past_end: end,
@@ -165,27 +154,11 @@ B: Clone {
             }
         }
         Strategy::Max => {
-            let shared_waker = Arc::new(SharedWaker {
-                outstanding_tasks: AtomicUsize::new(len),
-                waker: AtomicWaker::new(),
-            });
-            let mut task_vec = Vec::with_capacity(len);
-            for i in 0..len {
-                let task = SliceTask {
-                    build: f.clone(),
-                    own: vec_arc.clone(),
-                    vec_base,
-                    start: i,
-                    past_end: i + 1,
-                    shared_waker: shared_waker.clone(),
-                };
-                task_vec.push(task);
-            }
-            let result = VecResult { vec: Some(vec_arc), shared_waker };
-            VecBuilder {
-                tasks: task_vec,
-                result,
-            }
+            build_vec(len, Strategy::Tasks(len), f)
+        }
+        Strategy::TasksPerCore(tasks_per_core) => {
+            let tasks = tasks_per_core * num_cpus::get();
+            build_vec(len, Strategy::Tasks(tasks), f)
         }
     }
 }
@@ -247,7 +220,7 @@ mod tests {
             assert_eq!(task.past_end, start + 1);
             start += 1;
         }
-
-
     }
+
+
 }

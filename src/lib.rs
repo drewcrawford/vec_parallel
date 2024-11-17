@@ -13,6 +13,8 @@ pub enum Strategy {
     One,
     /**
     Creates the number of tasks specified.
+
+    If the number of tasks is greater than the number of elements, the number of tasks is reduced to the number of elements.
 */
     Tasks(usize),
     /**
@@ -128,6 +130,9 @@ B: Clone {
             build_vec(len, Strategy::Tasks(1), f)
         }
         Strategy::Tasks(tasks) => {
+            if tasks > len {
+                return build_vec(len, Strategy::Tasks(len), f);
+            }
             let shared_waker = Arc::new(SharedWaker {
                 outstanding_tasks: AtomicUsize::new(tasks),
                 waker: AtomicWaker::new(),
@@ -167,7 +172,11 @@ B: Clone {
 mod tests {
     use crate::VecResult;
 
-    #[test]
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_build_vec() {
         let builder = super::build_vec(10, super::Strategy::One, |i: usize| i);
         for task in builder.tasks {
@@ -177,7 +186,8 @@ mod tests {
         assert_eq!(o, (0..10).collect::<Vec<_>>());
     }
 
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_build_vec_tasks() {
         let builder = super::build_vec(10, super::Strategy::Tasks(2), |i: usize| i);
         assert_eq!(builder.tasks.len(), 2);
@@ -187,7 +197,8 @@ mod tests {
         assert_eq!(builder.tasks[1].past_end, 10);
     }
 
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_build_vec_tasks_11() {
         let builder = super::build_vec(13, super::Strategy::Tasks(3), |i: usize| i);
         assert_eq!(builder.tasks.len(), 3);
@@ -199,7 +210,9 @@ mod tests {
         assert_eq!(builder.tasks[2].past_end, 13);
     }
 
-    #[test] fn test_build_vec_tasks_103() {
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn test_build_vec_tasks_103() {
         let builder = super::build_vec(103, super::Strategy::Tasks(3), |i: usize| i);
         assert_eq!(builder.tasks.len(), 3);
         assert_eq!(builder.tasks[0].start, 0);
@@ -210,7 +223,8 @@ mod tests {
         assert_eq!(builder.tasks[2].past_end, 103);
     }
 
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_max() {
         let builder = super::build_vec(10, super::Strategy::Max, |i: usize| i);
         assert_eq!(builder.tasks.len(), 10);
@@ -219,6 +233,33 @@ mod tests {
             assert_eq!(task.start, start);
             assert_eq!(task.past_end, start + 1);
             start += 1;
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn test_too_many_tasks() {
+        let builder = super::build_vec(10, super::Strategy::Tasks(20), |i: usize| i);
+        assert_eq!(builder.tasks.len(), 10);
+        let mut start = 0;
+        for task in builder.tasks {
+            assert_eq!(task.start, start);
+            assert_eq!(task.past_end, start + 1);
+            start += 1;
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn test_tasks_per_core() {
+        let builder = super::build_vec(1000, super::Strategy::TasksPerCore(2), |i: usize| i);
+        let cpus = num_cpus::get();
+        assert_eq!(builder.tasks.len(), 2 * cpus);
+        let mut start = 0;
+        for task in builder.tasks {
+            assert_eq!(task.start, start);
+            assert!(task.past_end > start);
+            start = task.past_end;
         }
     }
 

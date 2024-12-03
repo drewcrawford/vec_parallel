@@ -46,6 +46,9 @@ struct SharedWaker {
 
 
 
+/**
+Represents an individual unit of work.
+*/
 #[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct SliceTask<T, B> {
@@ -392,5 +395,16 @@ mod tests {
         is_static(&a_result);
     }
 
+    #[cfg(feature = "some_executor")]
+    #[test] fn test_spawn_on() {
+        let executor = test_executors::aruntime::SpawnRuntime;
+        some_executor::thread_executor::set_thread_executor(Box::new(executor));
+        let builder = super::build_vec(10, super::Strategy::Max, |i: usize| i);
+
+        some_executor::thread_executor::thread_executor(|e| {
+            _ = builder.spawn_on(&mut e.unwrap().clone_box(), some_executor::Priority::unit_test(), some_executor::hint::Hint::default());
+        });
+
+    }
 
 }

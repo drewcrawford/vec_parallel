@@ -404,7 +404,6 @@ mod tests {
         some_executor::thread_executor::thread_executor(|e| {
             _ = builder.spawn_on(&mut e.unwrap().clone_box(), some_executor::Priority::unit_test(), some_executor::hint::Hint::default());
         });
-
     }
 
 }

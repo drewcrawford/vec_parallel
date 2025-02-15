@@ -7,7 +7,7 @@ edition = "2021"
 atomic-waker = "1.1.2"
 num_cpus = "1.16.0"
 #some_executor = {path = "../some_executor", optional = true}
-some_executor = {version = "0.3.0", optional = true}
+some_executor = {version = "0.4.1", optional = true}
 
 [dev-dependencies]
 test_executors = "0.3.2"

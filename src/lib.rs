@@ -5,7 +5,7 @@ Provides a way to build a vector in parallel.
 use std::future::Future;
 use std::mem::MaybeUninit;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::AtomicUsize;
 use std::task::{Context, Poll};
 use atomic_waker::AtomicWaker;
@@ -55,8 +55,7 @@ pub struct SliceTask<T, B> {
     ///A function that builds the value.
     build: B,
     ///An arc that ensures the slice is not deallocated.
-    _own: Arc<Vec<MaybeUninit<T>>>,
-    vec_base: *mut MaybeUninit<T>,
+    own: Weak<Vec<MaybeUninit<T>>>,
     start: usize,
     past_end: usize,
     shared_waker: Arc<SharedWaker>,
@@ -68,9 +67,12 @@ unsafe impl<T,B> Send for SliceTask<T,B> where T: Send, B: Send {}
 impl <T,B> SliceTask<T,B> where B: FnMut(usize) -> T {
     pub fn run(&mut self) {
         assert!(!self.poison, "Polling after completion");
+        let own = self.own.upgrade().expect("SliceTask was deallocated");
         for i in self.start..self.past_end {
             unsafe {
-                let ptr = self.vec_base.add(i);
+                let ptr = own.as_ptr();
+                // assuming our slices are nonoverlapping, we can write to the slice
+                let ptr = ptr as *mut MaybeUninit<T>;
                 ptr.write(MaybeUninit::new((self.build)(i)));
             }
         }
@@ -80,6 +82,25 @@ impl <T,B> SliceTask<T,B> where B: FnMut(usize) -> T {
         }
         self.poison = true;
     }
+
+    /**
+    This is a helper function to run the task in a depinned state.
+
+    # Safety
+    This function is unsafe because it assumes that we can write to the slice.  e.g., not deallocated,
+    no overlapping writes/reads, etc.
+*/
+    unsafe fn run_depinned(start: usize, past_end: usize, build: &mut B, vec_base: *mut MaybeUninit<T>, shared_waker: &Arc<SharedWaker>, poison: &mut bool) {
+        for i in start..past_end {
+            let ptr = vec_base.add(i);
+            ptr.write(MaybeUninit::new(build(i)));
+        }
+        let old = shared_waker.outstanding_tasks.fetch_sub(1, std::sync::atomic::Ordering::Release);
+        if old == 1 {
+            shared_waker.waker.wake();
+        }
+        *poison = true;
+    }
 }
 
 impl<T, B> Future for SliceTask<T, B> where B: FnMut(usize) -> T {
@@ -88,26 +109,22 @@ impl<T, B> Future for SliceTask<T, B> where B: FnMut(usize) -> T {
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         assert!(!self.poison, "Polling after completion");
         //pin-project
-        let (start, past_end, build, vec_base, shared_waker,poison) = unsafe {
+        let (start, past_end, build, weak_own, shared_waker,poison) = unsafe {
             let s = self.get_unchecked_mut();
             let start = &mut s.start;
             let past_end = &mut s.past_end;
             let build = &mut s.build;
-            let vec_base = &mut s.vec_base;
+            let weak_own = &mut s.own;
             let shared_waker = &mut s.shared_waker;
-            (start, past_end, build, vec_base, shared_waker, &mut s.poison)
+            (start, past_end, build, weak_own, shared_waker, &mut s.poison)
         };
-        for i in *start..*past_end {
-            unsafe {
-                let ptr = vec_base.add(i);
-                ptr.write(MaybeUninit::new(build(i)));
-            }
+        unsafe {
+            let safe_arc = weak_own.upgrade().expect("SliceTask was deallocated");
+            // assuming our slices are nonoverlapping, we can write to the slice
+            let ptr = safe_arc.as_ptr() as *mut MaybeUninit<T>;
+            Self::run_depinned(*start, *past_end, build, ptr, shared_waker, poison);
+
         }
-        let old = shared_waker.outstanding_tasks.fetch_sub(1, std::sync::atomic::Ordering::Release);
-        if old == 1 {
-            shared_waker.waker.wake();
-        }
-        *poison = true;
         Poll::Ready(())
     }
 }
@@ -217,7 +234,6 @@ B: Clone {
     let mut vec = Vec::with_capacity(len);
     vec.resize_with(len, MaybeUninit::uninit);
 
-    let vec_base = vec.as_mut_ptr();
     let vec_arc = Arc::new(vec);
     match strategy {
         Strategy::One => {
@@ -238,8 +254,7 @@ B: Clone {
                 let end = if i + 1 == tasks { len } else { start + chunk };
                 let task = SliceTask {
                     build: f.clone(),
-                    _own: vec_arc.clone(),
-                    vec_base,
+                    own: Arc::downgrade(&vec_arc),
                     start,
                     past_end: end,
                     shared_waker: shared_waker.clone(),
@@ -267,7 +282,7 @@ B: Clone {
 
 impl<T,B> PartialEq for SliceTask<T,B> {
     fn eq(&self, other: &Self) -> bool {
-        self.start == other.start && self.past_end == other.past_end && Arc::ptr_eq(&self._own, &other._own)
+        self.start == other.start && self.past_end == other.past_end && Weak::ptr_eq(&self.own, &other.own)
     }
 }
 
@@ -277,7 +292,7 @@ impl<T,B> std::hash::Hash for SliceTask<T,B> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.start.hash(state);
         self.past_end.hash(state);
-        Arc::as_ptr(&self._own).hash(state);
+        Weak::as_ptr(&self.own).hash(state);
     }
 }
 //asref/asmut - sort of hard to implement safely to avoid double-muts.

@@ -1,4 +1,8 @@
+//SPDX-License-Identifier: MIT OR Apache-2.0
 /*!
+
+![logo](../../../art/logo.png)
+
 A library for building vectors in parallel using async tasks.
 
 This crate provides utilities to construct `Vec<T>` in parallel by dividing the work into

@@ -7,7 +7,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo check
-      - run: cargo clippy
+      - run: cargo clippy --no-deps
       - run: cargo fmt --check
       - run: cargo doc
       - run: cargo test

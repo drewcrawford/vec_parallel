@@ -1,5 +1,34 @@
 /*!
-Provides a way to build a vector in parallel.
+A library for building vectors in parallel using async tasks.
+
+This crate provides utilities to construct `Vec<T>` in parallel by dividing the work into
+multiple async tasks that can run concurrently. This is particularly useful for CPU-bound
+initialization tasks where elements can be computed independently.
+
+# Example
+
+```
+use vec_parallel::{build_vec, Strategy};
+
+// Build a vector of squares using multiple tasks
+let builder = build_vec(100, Strategy::TasksPerCore(4), |i| i * i);
+
+// Run the tasks (in a real application, these would be spawned on an executor)
+for task in builder.tasks {
+    test_executors::spin_on(task);
+}
+
+// Get the final result
+let squares = test_executors::spin_on(builder.result);
+assert_eq!(squares[10], 100); // 10² = 100
+```
+
+# Features
+
+- **Flexible parallelization strategies**: Choose how many tasks to create
+- **Zero-copy construction**: Elements are written directly to their final location
+- **Executor-agnostic**: Works with any async runtime
+- **Optional executor integration**: Use the `some_executor` feature for convenient spawning
 */
 
 use std::future::Future;
@@ -10,30 +39,88 @@ use std::sync::atomic::AtomicUsize;
 use std::task::{Context, Poll};
 use atomic_waker::AtomicWaker;
 
+/// Determines how work is divided among parallel tasks.
+///
+/// The strategy controls how many tasks are created to build the vector.
+/// Different strategies are optimal for different workloads.
+///
+/// # Examples
+///
+/// ```
+/// use vec_parallel::{build_vec, Strategy};
+///
+/// // Use a single task (no parallelism)
+/// let builder = build_vec(10, Strategy::One, |i| i * 2);
+/// # for task in builder.tasks { test_executors::spin_on(task); }
+/// # let result = test_executors::spin_on(builder.result);
+///
+/// // Use exactly 4 tasks
+/// let builder = build_vec(100, Strategy::Tasks(4), |i| i * 2);
+/// # for task in builder.tasks { test_executors::spin_on(task); }
+/// # let result = test_executors::spin_on(builder.result);
+///
+/// // Create one task per element (maximum parallelism)
+/// let builder = build_vec(10, Strategy::Max, |i| i * 2);
+/// # for task in builder.tasks { test_executors::spin_on(task); }
+/// # let result = test_executors::spin_on(builder.result);
+///
+/// // Create 4 tasks per CPU core
+/// let builder = build_vec(1000, Strategy::TasksPerCore(4), |i| i * 2);
+/// # for task in builder.tasks { test_executors::spin_on(task); }
+/// # let result = test_executors::spin_on(builder.result);
+/// ```
 #[derive(Debug,Clone,Copy,PartialEq,Eq,Hash)]
 #[non_exhaustive]
 pub enum Strategy {
-    /**
-    Create a single task.
-    */
+    /// Creates a single task to build the entire vector.
+    ///
+    /// This effectively disables parallelism and is equivalent to
+    /// building the vector sequentially.
     One,
-    /**
-    Creates the number of tasks specified.
-
-    If the number of tasks is greater than the number of elements, the number of tasks is reduced to the number of elements.
-*/
+    /// Creates exactly the specified number of tasks.
+    ///
+    /// The work is divided evenly among the tasks. If the number of tasks
+    /// exceeds the number of elements, it is automatically reduced.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use vec_parallel::{build_vec, Strategy};
+    /// // Create 4 tasks to build a vector of 100 elements
+    /// // Each task will handle 25 elements
+    /// let builder = build_vec(100, Strategy::Tasks(4), |i| i);
+    /// assert_eq!(builder.tasks.len(), 4);
+    /// ```
     Tasks(usize),
-    /**
-    Creates a maximum number of tasks.
-    */
+    /// Creates one task per element (maximum parallelism).
+    ///
+    /// This strategy provides the finest granularity but may have
+    /// higher overhead for simple computations.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use vec_parallel::{build_vec, Strategy};
+    /// // Create 10 tasks for 10 elements
+    /// let builder = build_vec(10, Strategy::Max, |i| i);
+    /// assert_eq!(builder.tasks.len(), 10);
+    /// ```
     Max,
-    /**
-    Creates a number of tasks multiplied by the core count of the system.
-
-    This is useful for CPU-bound tasks.  Generally speaking, values of 5-15 provide good performance.
-
-    If the number of tasks is greater than the number of elements, the number of tasks is reduced to the number of elements.
-    */
+    /// Creates a number of tasks based on the CPU core count.
+    ///
+    /// The total number of tasks is `cores * multiplier`. This is ideal
+    /// for CPU-bound workloads. Common multipliers are 4-8 for balanced
+    /// performance.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use vec_parallel::{build_vec, Strategy};
+    /// // On a 4-core system, this creates 16 tasks
+    /// let builder = build_vec(1000, Strategy::TasksPerCore(4), |i| i);
+    /// let expected_tasks = 4 * num_cpus::get();
+    /// assert_eq!(builder.tasks.len(), expected_tasks);
+    /// ```
     TasksPerCore(usize),
 
 }
@@ -46,9 +133,27 @@ struct SharedWaker {
 
 
 
-/**
-Represents an individual unit of work.
-*/
+/// A future that builds a slice of the final vector.
+///
+/// Each `SliceTask` is responsible for computing and storing elements
+/// for a specific range of indices. Multiple tasks can run concurrently
+/// to build different parts of the vector in parallel.
+///
+/// # Example
+///
+/// ```
+/// use vec_parallel::{build_vec, Strategy};
+///
+/// let builder = build_vec(20, Strategy::Tasks(2), |i| i * 3);
+/// 
+/// // Each task handles a portion of the vector
+/// assert_eq!(builder.tasks.len(), 2);
+/// 
+/// // Tasks can be polled independently
+/// for mut task in builder.tasks {
+///     test_executors::spin_on(task);
+/// }
+/// ```
 #[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct SliceTask<T, B> {
@@ -65,6 +170,28 @@ pub struct SliceTask<T, B> {
 unsafe impl<T,B> Send for SliceTask<T,B> where T: Send, B: Send {}
 
 impl <T,B> SliceTask<T,B> where B: FnMut(usize) -> T {
+    /// Executes this task synchronously, building all elements in its range.
+    ///
+    /// This method is an alternative to polling the future and is useful when
+    /// you want to run tasks on specific threads or in a blocking context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called after the task has already completed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use vec_parallel::{build_vec, Strategy};
+    ///
+    /// let mut builder = build_vec(10, Strategy::One, |i| i * 2);
+    /// 
+    /// // Run the task manually
+    /// builder.tasks[0].run();
+    /// 
+    /// let result = test_executors::spin_on(builder.result);
+    /// assert_eq!(result, vec![0, 2, 4, 6, 8, 10, 12, 14, 16, 18]);
+    /// ```
     pub fn run(&mut self) {
         assert!(!self.poison, "Polling after completion");
         let own = self.own.upgrade().expect("SliceTask was deallocated");
@@ -73,7 +200,7 @@ impl <T,B> SliceTask<T,B> where B: FnMut(usize) -> T {
                 let ptr = own.as_ptr();
                 // assuming our slices are nonoverlapping, we can write to the slice
                 let ptr = ptr as *mut MaybeUninit<T>;
-                ptr.write(MaybeUninit::new((self.build)(i)));
+                ptr.add(i).write(MaybeUninit::new((self.build)(i)));
             }
         }
         let old = self.shared_waker.outstanding_tasks.fetch_sub(1, std::sync::atomic::Ordering::Release);
@@ -132,10 +259,29 @@ impl<T, B> Future for SliceTask<T, B> where B: FnMut(usize) -> T {
 
 
 
-/**
-Represents the overall result, or the final vector.
-*/
-
+/// A future that resolves to the completed vector.
+///
+/// This future waits for all [`SliceTask`]s to complete and then assembles
+/// the final vector. It uses atomic operations to track task completion
+/// without requiring locks.
+///
+/// # Example
+///
+/// ```
+/// use vec_parallel::{build_vec, Strategy};
+///
+/// let builder = build_vec(5, Strategy::Max, |i| format!("Item {}", i));
+/// 
+/// // Complete all tasks
+/// for task in builder.tasks {
+///     test_executors::spin_on(task);
+/// }
+/// 
+/// // Get the final vector
+/// let result = test_executors::spin_on(builder.result);
+/// assert_eq!(result[0], "Item 0");
+/// assert_eq!(result[4], "Item 4");
+/// ```
 #[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct VecResult<I> {
@@ -171,23 +317,85 @@ impl<I> Future for VecResult<I> {
 }
 
 
-/**
-Represents an entire vector build.
-*/
+/// Contains the tasks and result future for building a vector in parallel.
+///
+/// A `VecBuilder` is created by [`build_vec`] and contains:
+/// - `tasks`: Individual futures that build portions of the vector
+/// - `result`: A future that resolves to the completed vector
+///
+/// # Usage Pattern
+///
+/// 1. Create a builder with [`build_vec`]
+/// 2. Spawn or poll the tasks (potentially on different threads)
+/// 3. Await the result to get the final vector
+///
+/// # Example
+///
+/// ```
+/// use vec_parallel::{build_vec, Strategy};
+///
+/// async fn build_squares() -> Vec<u32> {
+///     let builder = build_vec(10, Strategy::TasksPerCore(2), |i| {
+///         // Simulate expensive computation
+///         (i as u32) * (i as u32)
+///     });
+///     
+///     // In a real application, spawn tasks on your executor
+///     for task in builder.tasks {
+///         // tokio::spawn(task);
+///         # test_executors::spin_on(task);
+///     }
+///     
+///     // Wait for completion
+///     # test_executors::spin_on(builder.result)
+///     // builder.result.await
+/// }
+/// # test_executors::spin_on(build_squares());
+/// ```
 pub struct VecBuilder<I, B> {
-    ///The individual tasks.
+    /// The individual tasks that build portions of the vector.
+    ///
+    /// These can be spawned on an executor or polled manually.
     pub tasks: Vec<SliceTask<I, B>>,
-    ///The final result.
+    /// A future that resolves to the completed vector.
+    ///
+    /// This should be awaited after all tasks have been spawned.
     pub result: VecResult<I>,
 }
 
 #[cfg(feature = "some_executor")]
 impl <I,B> VecBuilder<I,B> {
-    /**
-    Spawns the tasks on the executor.
-
-    The result future is executed on the current task.
-*/
+    /// Spawns all tasks on the provided executor and awaits the result.
+    ///
+    /// This is a convenience method that handles task spawning and result
+    /// awaiting in one call. The tasks are spawned with the specified
+    /// priority and hint.
+    ///
+    /// # Arguments
+    ///
+    /// * `executor` - The executor to spawn tasks on
+    /// * `priority` - Task priority for scheduling
+    /// * `hint` - Execution hint for the executor
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "some_executor")]
+    /// # async fn example() {
+    /// use vec_parallel::{build_vec, Strategy};
+    /// use some_executor::{Priority, hint::Hint};
+    ///
+    /// let mut executor = /* your executor */;
+    /// # let mut executor: Box<dyn some_executor::SomeExecutor> = todo!();
+    /// 
+    /// let builder = build_vec(100, Strategy::TasksPerCore(4), |i| i * i);
+    /// let squares = builder.spawn_on(
+    ///     &mut *executor,
+    ///     Priority::default(),
+    ///     Hint::default()
+    /// ).await;
+    /// # }
+    /// ```
     pub async fn spawn_on<E: some_executor::SomeExecutor>(mut self, executor: &mut E, priority: some_executor::Priority, hint: some_executor::hint::Hint) -> Vec<I>
     where I: Send,
     B: FnMut(usize) -> I,
@@ -212,22 +420,70 @@ impl <I,B> VecBuilder<I,B> {
     }
 }
 
-/**
-Builds a vector in parallel.
-
-# Example
-```
-use vec_parallel::*;
-let builder = build_vec(10, vec_parallel::Strategy::Max, |i: usize| i);
-//run the invididual tasks.  Pro tip, these can be dispatched in parallel.
-for task in builder.tasks {
-    test_executors::spin_on(task);
-}
-//wait for the result
-let o = test_executors::spin_on(builder.result);
-assert_eq!(o, (0..10).collect::<Vec<_>>());
-```
-*/
+/// Creates a builder for constructing a vector in parallel.
+///
+/// This function divides the work of building a vector into multiple async tasks
+/// based on the specified strategy. Each task computes elements for a range of
+/// indices using the provided closure.
+///
+/// # Arguments
+///
+/// * `len` - The length of the vector to create
+/// * `strategy` - How to divide the work among tasks
+/// * `f` - A closure that computes the element at a given index
+///
+/// # Type Parameters
+///
+/// * `R` - The element type of the resulting vector
+/// * `B` - The closure type (must be `FnMut(usize) -> R` and `Clone`)
+///
+/// # Examples
+///
+/// ## Basic usage
+///
+/// ```
+/// use vec_parallel::{build_vec, Strategy};
+///
+/// // Build a vector of squares
+/// let builder = build_vec(10, Strategy::Tasks(2), |i| i * i);
+/// 
+/// // Execute tasks
+/// for task in builder.tasks {
+///     test_executors::spin_on(task);
+/// }
+/// 
+/// // Get result
+/// let squares = test_executors::spin_on(builder.result);
+/// assert_eq!(squares, vec![0, 1, 4, 9, 16, 25, 36, 49, 64, 81]);
+/// ```
+///
+/// ## With expensive computation
+///
+/// ```
+/// use vec_parallel::{build_vec, Strategy};
+///
+/// fn expensive_computation(n: usize) -> u64 {
+///     // Simulate expensive work
+///     (0..1000).map(|i| (n + i) as u64).sum()
+/// }
+///
+/// let builder = build_vec(100, Strategy::TasksPerCore(4), expensive_computation);
+/// # for task in builder.tasks { test_executors::spin_on(task); }
+/// # let result = test_executors::spin_on(builder.result);
+/// ```
+///
+/// ## Stateful closures
+///
+/// ```
+/// use vec_parallel::{build_vec, Strategy};
+///
+/// let offset = 100;
+/// let builder = build_vec(5, Strategy::Max, move |i| i + offset);
+/// 
+/// # for task in builder.tasks { test_executors::spin_on(task); }
+/// let result = test_executors::spin_on(builder.result);
+/// assert_eq!(result, vec![100, 101, 102, 103, 104]);
+/// ```
 pub fn build_vec<'a, R, B>(len: usize, strategy: Strategy, f: B) -> VecBuilder<R, B>
 where B: FnMut(usize) -> R,
 B: Clone {

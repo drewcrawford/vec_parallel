@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 authors = ["Drew Crawford <drew@sealedabstract.com>"]
+description = "Construct your Vec in parallel"
 repository = "https://github.com/drewcrawford/vec_parallel"
 homepage = "https://sealedabstract.com/code/vec_parallel"
 categories = ["asynchronous", "concurrency"]

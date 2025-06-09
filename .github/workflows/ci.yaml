@@ -1,8 +1,13 @@
 on: [push]
+env:
+  RUSTFLAGS: "--cap-lints=allow -D warnings"
 jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: cargo check
+      - run: cargo clippy
+      - run: cargo fmt --check
       - run: cargo doc
       - run: cargo test

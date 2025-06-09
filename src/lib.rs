@@ -352,6 +352,7 @@ impl<I> Future for VecResult<I> {
 /// }
 /// # test_executors::spin_on(build_squares());
 /// ```
+#[derive(Debug)]
 pub struct VecBuilder<I, B> {
     /// The individual tasks that build portions of the vector.
     ///
@@ -536,6 +537,26 @@ B: Clone {
 
 //boilerplates
 
+// VecBuilder boilerplate
+// Clone: Not implemented. VecBuilder contains mutable tasks with shared synchronization state.
+// Cloning would create confusing semantics around task execution and completion tracking.
+// May be reconsidered in the future if a clear use case emerges.
+//
+// PartialEq/Eq: Not implemented. Each VecBuilder represents a unique parallel computation
+// with distinct synchronization state. Equality comparisons don't have meaningful semantics.
+//
+// Send/Sync: Automatically derived based on generic parameters.
+// VecBuilder is Send when I: Send and B: Send.
+// VecBuilder is Sync when I: Send + Sync and B: Send + Sync.
+// This follows from the Send/Sync properties of its fields (tasks and result).
+//
+// Hash: Not implemented since PartialEq/Eq are not implemented.
+// Default: Not implemented. VecBuilder requires specific parameters (length, strategy, closure).
+// Display: Not implemented. Not typically useful for builder types.
+// From/Into: Not implemented. No obvious conversions to/from other types.
+// AsRef/AsMut: Not implemented. Fields are already public, providing direct access.
+// Deref/DerefMut: Not implemented. VecBuilder is not a wrapper around a single underlying type.
+
 impl<T,B> PartialEq for SliceTask<T,B> {
     fn eq(&self, other: &Self) -> bool {
         self.start == other.start && self.past_end == other.past_end && Weak::ptr_eq(&self.own, &other.own)
@@ -553,7 +574,33 @@ impl<T,B> std::hash::Hash for SliceTask<T,B> {
 }
 //asref/asmut - sort of hard to implement safely to avoid double-muts.
 
-
+// VecResult boilerplate
+// Clone: Not implemented. VecResult is a consuming future that takes ownership of the 
+// underlying Vec when polled to completion. Cloning would create confusing semantics 
+// where multiple futures try to take ownership of the same data.
+//
+// PartialEq/Eq: Not implemented. VecResult is a stateful future with internal synchronization
+// state that gets consumed during polling. Equality comparisons don't have meaningful semantics.
+//
+// Hash: Not implemented since PartialEq/Eq are not implemented.
+//
+// Copy: Not implemented. Contains heap-allocated data via Arc.
+//
+// Default: Not implemented. VecResult requires specific initialization with a vec and shared_waker
+// that coordinate with associated SliceTask instances.
+//
+// Display: Not implemented. Not typically useful for future types.
+//
+// From/Into: Not implemented. No obvious conversions to/from other types.
+//
+// AsRef/AsMut: Not implemented. Internal fields are private implementation details
+// of the future's synchronization mechanism.
+//
+// Deref/DerefMut: Not implemented. VecResult is not a wrapper around a single underlying type.
+//
+// Send/Sync: Automatically derived based on generic parameter I.
+// VecResult is Send when I: Send, and Sync when I: Send + Sync.
+// This follows from the Send/Sync properties of Arc<Vec<MaybeUninit<I>>> and Arc<SharedWaker>.
 
 #[cfg(test)]
 mod tests {

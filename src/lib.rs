@@ -31,13 +31,13 @@ assert_eq!(squares[10], 100); // 10² = 100
 - **Optional executor integration**: Use the `some_executor` feature for convenient spawning
 */
 
+use atomic_waker::AtomicWaker;
 use std::future::Future;
 use std::mem::MaybeUninit;
 use std::pin::Pin;
-use std::sync::{Arc, Weak};
 use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
-use atomic_waker::AtomicWaker;
 
 /// Determines how work is divided among parallel tasks.
 ///
@@ -69,7 +69,7 @@ use atomic_waker::AtomicWaker;
 /// # for task in builder.tasks { test_executors::spin_on(task); }
 /// # let result = test_executors::spin_on(builder.result);
 /// ```
-#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Strategy {
     /// Creates a single task to build the entire vector.
@@ -122,7 +122,6 @@ pub enum Strategy {
     /// assert_eq!(builder.tasks.len(), expected_tasks);
     /// ```
     TasksPerCore(usize),
-
 }
 
 #[derive(Debug)]
@@ -130,8 +129,6 @@ struct SharedWaker {
     outstanding_tasks: AtomicUsize,
     waker: AtomicWaker,
 }
-
-
 
 /// A future that builds a slice of the final vector.
 ///
@@ -145,10 +142,10 @@ struct SharedWaker {
 /// use vec_parallel::{build_vec, Strategy};
 ///
 /// let builder = build_vec(20, Strategy::Tasks(2), |i| i * 3);
-/// 
+///
 /// // Each task handles a portion of the vector
 /// assert_eq!(builder.tasks.len(), 2);
-/// 
+///
 /// // Tasks can be polled independently
 /// for mut task in builder.tasks {
 ///     test_executors::spin_on(task);
@@ -167,9 +164,17 @@ pub struct SliceTask<T, B> {
     poison: bool,
 }
 
-unsafe impl<T,B> Send for SliceTask<T,B> where T: Send, B: Send {}
+unsafe impl<T, B> Send for SliceTask<T, B>
+where
+    T: Send,
+    B: Send,
+{
+}
 
-impl <T,B> SliceTask<T,B> where B: FnMut(usize) -> T {
+impl<T, B> SliceTask<T, B>
+where
+    B: FnMut(usize) -> T,
+{
     /// Executes this task synchronously, building all elements in its range.
     ///
     /// This method is an alternative to polling the future and is useful when
@@ -185,10 +190,10 @@ impl <T,B> SliceTask<T,B> where B: FnMut(usize) -> T {
     /// use vec_parallel::{build_vec, Strategy};
     ///
     /// let mut builder = build_vec(10, Strategy::One, |i| i * 2);
-    /// 
+    ///
     /// // Run the task manually
     /// builder.tasks[0].run();
-    /// 
+    ///
     /// let result = test_executors::spin_on(builder.result);
     /// assert_eq!(result, vec![0, 2, 4, 6, 8, 10, 12, 14, 16, 18]);
     /// ```
@@ -203,7 +208,10 @@ impl <T,B> SliceTask<T,B> where B: FnMut(usize) -> T {
                 ptr.add(i).write(MaybeUninit::new((self.build)(i)));
             }
         }
-        let old = self.shared_waker.outstanding_tasks.fetch_sub(1, std::sync::atomic::Ordering::Release);
+        let old = self
+            .shared_waker
+            .outstanding_tasks
+            .fetch_sub(1, std::sync::atomic::Ordering::Release);
         if old == 1 {
             self.shared_waker.waker.wake();
         }
@@ -211,21 +219,30 @@ impl <T,B> SliceTask<T,B> where B: FnMut(usize) -> T {
     }
 
     /**
-    This is a helper function to run the task in a depinned state.
+        This is a helper function to run the task in a depinned state.
 
-    # Safety
-    This function is unsafe because it assumes that we can write to the slice.  e.g., not deallocated,
-    no overlapping writes/reads, etc.
-*/
-    unsafe fn run_depinned(start: usize, past_end: usize, build: &mut B, vec_base: *mut MaybeUninit<T>, shared_waker: &Arc<SharedWaker>, poison: &mut bool) {
+        # Safety
+        This function is unsafe because it assumes that we can write to the slice.  e.g., not deallocated,
+        no overlapping writes/reads, etc.
+    */
+    unsafe fn run_depinned(
+        start: usize,
+        past_end: usize,
+        build: &mut B,
+        vec_base: *mut MaybeUninit<T>,
+        shared_waker: &Arc<SharedWaker>,
+        poison: &mut bool,
+    ) {
         for i in start..past_end {
             unsafe {
-            // assuming our slices are nonoverlapping, we can write to the slice
+                // assuming our slices are nonoverlapping, we can write to the slice
                 let ptr = vec_base.add(i);
                 ptr.write(MaybeUninit::new(build(i)));
             }
         }
-        let old = shared_waker.outstanding_tasks.fetch_sub(1, std::sync::atomic::Ordering::Release);
+        let old = shared_waker
+            .outstanding_tasks
+            .fetch_sub(1, std::sync::atomic::Ordering::Release);
         if old == 1 {
             shared_waker.waker.wake();
         }
@@ -233,34 +250,40 @@ impl <T,B> SliceTask<T,B> where B: FnMut(usize) -> T {
     }
 }
 
-impl<T, B> Future for SliceTask<T, B> where B: FnMut(usize) -> T {
+impl<T, B> Future for SliceTask<T, B>
+where
+    B: FnMut(usize) -> T,
+{
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         assert!(!self.poison, "Polling after completion");
         //pin-project
-        let (start, past_end, build, weak_own, shared_waker,poison) = unsafe {
+        let (start, past_end, build, weak_own, shared_waker, poison) = unsafe {
             let s = self.get_unchecked_mut();
             let start = &mut s.start;
             let past_end = &mut s.past_end;
             let build = &mut s.build;
             let weak_own = &mut s.own;
             let shared_waker = &mut s.shared_waker;
-            (start, past_end, build, weak_own, shared_waker, &mut s.poison)
+            (
+                start,
+                past_end,
+                build,
+                weak_own,
+                shared_waker,
+                &mut s.poison,
+            )
         };
         unsafe {
             let safe_arc = weak_own.upgrade().expect("SliceTask was deallocated");
             // assuming our slices are nonoverlapping, we can write to the slice
             let ptr = safe_arc.as_ptr() as *mut MaybeUninit<T>;
             Self::run_depinned(*start, *past_end, build, ptr, shared_waker, poison);
-
         }
         Poll::Ready(())
     }
 }
-
-
-
 
 /// A future that resolves to the completed vector.
 ///
@@ -274,12 +297,12 @@ impl<T, B> Future for SliceTask<T, B> where B: FnMut(usize) -> T {
 /// use vec_parallel::{build_vec, Strategy};
 ///
 /// let builder = build_vec(5, Strategy::Max, |i| format!("Item {}", i));
-/// 
+///
 /// // Complete all tasks
 /// for task in builder.tasks {
 ///     test_executors::spin_on(task);
 /// }
-/// 
+///
 /// // Get the final vector
 /// let result = test_executors::spin_on(builder.result);
 /// assert_eq!(result[0], "Item 0");
@@ -296,7 +319,12 @@ impl<I> Future for VecResult<I> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.shared_waker.waker.register(cx.waker());
-        if self.shared_waker.outstanding_tasks.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        if self
+            .shared_waker
+            .outstanding_tasks
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
             let v = self.vec.take().expect("Polling after completion");
             let mut v = Arc::into_inner(v).expect("Too many references");
             let ptr = v.as_mut_ptr() as *mut I;
@@ -312,13 +340,11 @@ impl<I> Future for VecResult<I> {
                 f
             };
             Poll::Ready(f)
-
         } else {
             Poll::Pending
         }
     }
 }
-
 
 /// Contains the tasks and result future for building a vector in parallel.
 ///
@@ -368,7 +394,7 @@ pub struct VecBuilder<I, B> {
 }
 
 #[cfg(feature = "some_executor")]
-impl <I,B> VecBuilder<I,B> {
+impl<I, B> VecBuilder<I, B> {
     /// Spawns all tasks on the provided executor and awaits the result.
     ///
     /// This is a convenience method that handles task spawning and result
@@ -391,7 +417,7 @@ impl <I,B> VecBuilder<I,B> {
     ///
     /// let mut executor = /* your executor */;
     /// # let mut executor: Box<dyn some_executor::SomeExecutor> = todo!();
-    /// 
+    ///
     /// let builder = build_vec(100, Strategy::TasksPerCore(4), |i| i * i);
     /// let squares = builder.spawn_on(
     ///     &mut *executor,
@@ -400,13 +426,20 @@ impl <I,B> VecBuilder<I,B> {
     /// ).await;
     /// # }
     /// ```
-    pub async fn spawn_on<E: some_executor::SomeExecutor>(mut self, executor: &mut E, priority: some_executor::Priority, hint: some_executor::hint::Hint) -> Vec<I>
-    where I: Send,
-    B: FnMut(usize) -> I,
-    B: Send,
-    I: 'static,
-    B: 'static, {
-        use some_executor::task::{ConfigurationBuilder,Task};
+    pub async fn spawn_on<E: some_executor::SomeExecutor>(
+        mut self,
+        executor: &mut E,
+        priority: some_executor::Priority,
+        hint: some_executor::hint::Hint,
+    ) -> Vec<I>
+    where
+        I: Send,
+        B: FnMut(usize) -> I,
+        B: Send,
+        I: 'static,
+        B: 'static,
+    {
+        use some_executor::task::{ConfigurationBuilder, Task};
 
         let configuration = ConfigurationBuilder::new()
             .priority(priority)
@@ -414,8 +447,8 @@ impl <I,B> VecBuilder<I,B> {
             .build();
 
         let mut observers = Vec::with_capacity(self.tasks.len());
-        for (t,task) in self.tasks.drain(..).enumerate() {
-            let label = format!("VecBuilder task {}",t);
+        for (t, task) in self.tasks.drain(..).enumerate() {
+            let label = format!("VecBuilder task {}", t);
             let t = Task::without_notifications(label, task, configuration.clone());
             let o = executor.spawn(t);
             observers.push(o);
@@ -450,12 +483,12 @@ impl <I,B> VecBuilder<I,B> {
 ///
 /// // Build a vector of squares
 /// let builder = build_vec(10, Strategy::Tasks(2), |i| i * i);
-/// 
+///
 /// // Execute tasks
 /// for task in builder.tasks {
 ///     test_executors::spin_on(task);
 /// }
-/// 
+///
 /// // Get result
 /// let squares = test_executors::spin_on(builder.result);
 /// assert_eq!(squares, vec![0, 1, 4, 9, 16, 25, 36, 49, 64, 81]);
@@ -483,22 +516,22 @@ impl <I,B> VecBuilder<I,B> {
 ///
 /// let offset = 100;
 /// let builder = build_vec(5, Strategy::Max, move |i| i + offset);
-/// 
+///
 /// # for task in builder.tasks { test_executors::spin_on(task); }
 /// let result = test_executors::spin_on(builder.result);
 /// assert_eq!(result, vec![100, 101, 102, 103, 104]);
 /// ```
 pub fn build_vec<'a, R, B>(len: usize, strategy: Strategy, f: B) -> VecBuilder<R, B>
-where B: FnMut(usize) -> R,
-B: Clone {
+where
+    B: FnMut(usize) -> R,
+    B: Clone,
+{
     let mut vec = Vec::with_capacity(len);
     vec.resize_with(len, MaybeUninit::uninit);
 
     let vec_arc = Arc::new(vec);
     match strategy {
-        Strategy::One => {
-            build_vec(len, Strategy::Tasks(1), f)
-        }
+        Strategy::One => build_vec(len, Strategy::Tasks(1), f),
         Strategy::Tasks(tasks) => {
             if tasks > len {
                 return build_vec(len, Strategy::Tasks(len), f);
@@ -522,15 +555,16 @@ B: Clone {
                 };
                 task_vec.push(task);
             }
-            let result = VecResult { vec: Some(vec_arc), shared_waker };
+            let result = VecResult {
+                vec: Some(vec_arc),
+                shared_waker,
+            };
             VecBuilder {
                 tasks: task_vec,
                 result,
             }
         }
-        Strategy::Max => {
-            build_vec(len, Strategy::Tasks(len), f)
-        }
+        Strategy::Max => build_vec(len, Strategy::Tasks(len), f),
         Strategy::TasksPerCore(tasks_per_core) => {
             let tasks = tasks_per_core * num_cpus::get();
             build_vec(len, Strategy::Tasks(tasks), f)
@@ -560,15 +594,17 @@ B: Clone {
 // AsRef/AsMut: Not implemented. Fields are already public, providing direct access.
 // Deref/DerefMut: Not implemented. VecBuilder is not a wrapper around a single underlying type.
 
-impl<T,B> PartialEq for SliceTask<T,B> {
+impl<T, B> PartialEq for SliceTask<T, B> {
     fn eq(&self, other: &Self) -> bool {
-        self.start == other.start && self.past_end == other.past_end && Weak::ptr_eq(&self.own, &other.own)
+        self.start == other.start
+            && self.past_end == other.past_end
+            && Weak::ptr_eq(&self.own, &other.own)
     }
 }
 
-impl<T,B> Eq for SliceTask<T,B> {}
+impl<T, B> Eq for SliceTask<T, B> {}
 
-impl<T,B> std::hash::Hash for SliceTask<T,B> {
+impl<T, B> std::hash::Hash for SliceTask<T, B> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.start.hash(state);
         self.past_end.hash(state);
@@ -578,8 +614,8 @@ impl<T,B> std::hash::Hash for SliceTask<T,B> {
 //asref/asmut - sort of hard to implement safely to avoid double-muts.
 
 // VecResult boilerplate
-// Clone: Not implemented. VecResult is a consuming future that takes ownership of the 
-// underlying Vec when polled to completion. Cloning would create confusing semantics 
+// Clone: Not implemented. VecResult is a consuming future that takes ownership of the
+// underlying Vec when polled to completion. Cloning would create confusing semantics
 // where multiple futures try to take ownership of the same data.
 //
 // PartialEq/Eq: Not implemented. VecResult is a stateful future with internal synchronization
@@ -607,7 +643,7 @@ impl<T,B> std::hash::Hash for SliceTask<T,B> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{VecResult};
+    use crate::VecResult;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
@@ -640,7 +676,7 @@ mod tests {
         let builder = super::build_vec(13, super::Strategy::Tasks(3), |i: usize| i);
         assert_eq!(builder.tasks.len(), 3);
         assert_eq!(builder.tasks[0].start, 0);
-        assert_eq!(builder.tasks[0].past_end,4);
+        assert_eq!(builder.tasks[0].past_end, 4);
         assert_eq!(builder.tasks[1].start, 4);
         assert_eq!(builder.tasks[1].past_end, 8);
         assert_eq!(builder.tasks[2].start, 8);
@@ -717,14 +753,18 @@ mod tests {
     }
 
     #[cfg(feature = "some_executor")]
-    #[test] fn test_spawn_on() {
+    #[test]
+    fn test_spawn_on() {
         let executor = test_executors::aruntime::SpawnRuntime;
         some_executor::thread_executor::set_thread_executor(Box::new(executor));
         let builder = super::build_vec(10, super::Strategy::Max, |i: usize| i);
 
         some_executor::thread_executor::thread_executor(|e| {
-            _ = builder.spawn_on(&mut e.unwrap().clone_box(), some_executor::Priority::unit_test(), some_executor::hint::Hint::default());
+            _ = builder.spawn_on(
+                &mut e.unwrap().clone_box(),
+                some_executor::Priority::unit_test(),
+                some_executor::hint::Hint::default(),
+            );
         });
     }
-
 }

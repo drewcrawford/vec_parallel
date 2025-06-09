@@ -219,8 +219,11 @@ impl <T,B> SliceTask<T,B> where B: FnMut(usize) -> T {
 */
     unsafe fn run_depinned(start: usize, past_end: usize, build: &mut B, vec_base: *mut MaybeUninit<T>, shared_waker: &Arc<SharedWaker>, poison: &mut bool) {
         for i in start..past_end {
-            let ptr = vec_base.add(i);
-            ptr.write(MaybeUninit::new(build(i)));
+            unsafe {
+            // assuming our slices are nonoverlapping, we can write to the slice
+                let ptr = vec_base.add(i);
+                ptr.write(MaybeUninit::new(build(i)));
+            }
         }
         let old = shared_waker.outstanding_tasks.fetch_sub(1, std::sync::atomic::Ordering::Release);
         if old == 1 {

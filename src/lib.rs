@@ -521,7 +521,7 @@ impl<I, B> VecBuilder<I, B> {
 /// let result = test_executors::spin_on(builder.result);
 /// assert_eq!(result, vec![100, 101, 102, 103, 104]);
 /// ```
-pub fn build_vec<'a, R, B>(len: usize, strategy: Strategy, f: B) -> VecBuilder<R, B>
+pub fn build_vec<R, B>(len: usize, strategy: Strategy, f: B) -> VecBuilder<R, B>
 where
     B: FnMut(usize) -> R,
     B: Clone,

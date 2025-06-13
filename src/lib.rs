@@ -397,9 +397,9 @@ pub struct VecBuilder<I, B> {
     pub result: VecResult<I>,
 }
 
-#[cfg(feature="some_executor")]
+#[cfg(feature = "some_executor")]
 pub type Hint = some_executor::hint::Hint;
-#[cfg(feature="some_executor")]
+#[cfg(feature = "some_executor")]
 pub type Priority = some_executor::Priority;
 
 #[cfg(feature = "some_executor")]

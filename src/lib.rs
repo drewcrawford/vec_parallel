@@ -420,11 +420,19 @@ impl<I, B> VecBuilder<I, B> {
     ///
     /// ```no_run
     /// # #[cfg(feature = "some_executor")]
-    /// # async fn example() {
+    /// # use std::any::Any;
+    /// # use std::convert::Infallible;
+    /// use std::pin::Pin;
+    /// # 
+    /// # use some_executor::{BoxedSendObserverFuture, ObjSafeTask, SomeExecutor};
+    /// # use some_executor::observer::{FinishedObservation, Observer, ObserverNotified, TypedObserver};
+    /// # use some_executor::task::Task;
+    ///
+    /// async fn example() {
     /// use vec_parallel::{build_vec, Strategy};
     /// use vec_parallel::{Priority, Hint};
     ///
-    /// let mut executor = todo!() /* your executor */;
+    /// let mut executor: MyExecutor = todo!() /* your executor */;
     /// # struct MyExecutor;
     /// # impl SomeExecutor for MyExecutor {
     /// #     type ExecutorNotifier = std::convert::Infallible;
@@ -445,11 +453,10 @@ impl<I, B> VecBuilder<I, B> {
     /// #         todo!()
     /// #     }
     /// # }
-    /// # let mut executor = MyExecutor;
     ///
     /// let builder = build_vec(100, Strategy::TasksPerCore(4), |i| i * i);
     /// let squares = builder.spawn_on(
-    ///     &mut *executor,
+    ///     &mut executor,
     ///     Priority::unit_test(),
     ///     Hint::default()
     /// ).await;
@@ -478,7 +485,7 @@ impl<I, B> VecBuilder<I, B> {
         let mut observers = Vec::with_capacity(self.tasks.len());
         for (t, task) in self.tasks.drain(..).enumerate() {
             let label = format!("VecBuilder task {}", t);
-            let t = Task::without_notifications(label, task, configuration.clone());
+            let t = Task::without_notifications(label,  configuration.clone(),task);
             let o = executor.spawn(t);
             observers.push(o);
         }

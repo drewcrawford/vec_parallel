@@ -1,14 +1,35 @@
-# simple v2
+# feature matrix v1
 on: [push]
 env:
   RUSTFLAGS: "-D warnings"
+
 jobs:
   ci:
     runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        features:
+          - ""                              # no features
+          - "some_executor"
+
     steps:
       - uses: actions/checkout@v4
-      - run: cargo fmt --check
-      - run: cargo check
-      - run: cargo clippy --no-deps
-      - run: cargo doc
-      - run: cargo test
+
+      - name: "CI"
+        # expose the raw comma-separated list in FEATURE_FLAGS
+        env:
+          FEATURE_FLAGS: ${{ matrix.features }}
+        run: |
+          # if FEATURE_FLAGS is non-empty, prepend "--features="  
+          if [ -n "$FEATURE_FLAGS" ]; then  
+            FLAGS="--features=$FEATURE_FLAGS"  
+          else  
+            FLAGS=""  
+          fi  
+          
+          cargo fmt --check  
+          cargo check    $FLAGS  
+          cargo clippy --no-deps $FLAGS  
+          cargo doc      $FLAGS  
+          cargo test     $FLAGS

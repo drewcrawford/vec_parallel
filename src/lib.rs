@@ -423,7 +423,7 @@ impl<I, B> VecBuilder<I, B> {
     /// # use std::any::Any;
     /// # use std::convert::Infallible;
     /// use std::pin::Pin;
-    /// # 
+    /// #
     /// # use some_executor::{BoxedSendObserverFuture, ObjSafeTask, SomeExecutor};
     /// # use some_executor::observer::{FinishedObservation, Observer, ObserverNotified, TypedObserver};
     /// # use some_executor::task::Task;
@@ -485,7 +485,7 @@ impl<I, B> VecBuilder<I, B> {
         let mut observers = Vec::with_capacity(self.tasks.len());
         for (t, task) in self.tasks.drain(..).enumerate() {
             let label = format!("VecBuilder task {}", t);
-            let t = Task::without_notifications(label,  configuration.clone(),task);
+            let t = Task::without_notifications(label, configuration.clone(), task);
             let o = executor.spawn(t);
             observers.push(o);
         }

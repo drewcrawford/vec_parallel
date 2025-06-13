@@ -397,6 +397,11 @@ pub struct VecBuilder<I, B> {
     pub result: VecResult<I>,
 }
 
+#[cfg(feature="some_executor")]
+pub type Hint = some_executor::hint::Hint;
+#[cfg(feature="some_executor")]
+pub type Priority = some_executor::Priority;
+
 #[cfg(feature = "some_executor")]
 impl<I, B> VecBuilder<I, B> {
     /// Spawns all tasks on the provided executor and awaits the result.
@@ -417,15 +422,35 @@ impl<I, B> VecBuilder<I, B> {
     /// # #[cfg(feature = "some_executor")]
     /// # async fn example() {
     /// use vec_parallel::{build_vec, Strategy};
-    /// use some_executor::{Priority, hint::Hint};
+    /// use vec_parallel::{Priority, Hint};
     ///
-    /// let mut executor = /* your executor */;
-    /// # let mut executor: Box<dyn some_executor::SomeExecutor> = todo!();
+    /// let mut executor = todo!() /* your executor */;
+    /// # struct MyExecutor;
+    /// # impl SomeExecutor for MyExecutor {
+    /// #     type ExecutorNotifier = std::convert::Infallible;
+    /// #     fn spawn<F, N>(&mut self, task: Task<F, N>) -> impl some_executor::observer::Observer<Value = F::Output>
+    /// #     where F: std::future::Future + Send + 'static, N: some_executor::observer::ObserverNotified<F::Output> + Send + 'static, F::Output: Send + 'static
+    /// #     { todo!() as TypedObserver::<F::Output, Infallible> }
+    /// #     fn spawn_async<F, N>(&mut self, task: Task<F, N>) -> impl std::future::Future<Output = impl some_executor::observer::Observer<Value = F::Output>>
+    /// #     where F: std::future::Future + Send + 'static, N: some_executor::observer::ObserverNotified<F::Output> + Send + 'static, F::Output: Send + 'static  
+    /// #     { async { todo!() as TypedObserver::<F::Output, Infallible>} }
+    /// #     fn executor_notifier(&mut self) -> Option<Self::ExecutorNotifier> { None }
+    /// #     fn clone_box(&self) -> Box<dyn SomeExecutor<ExecutorNotifier = Self::ExecutorNotifier>> { todo!() }
+    ///
+    /// #     fn spawn_objsafe_async<'s>(&'s mut self, task: Task<Pin<Box<dyn Future<Output=Box<dyn Any + 'static + Send>> + 'static + Send>>, Box<dyn ObserverNotified<dyn Any + Send> + Send>>) -> Box<dyn Future<Output=Box<dyn Observer<Value=Box<dyn Any + Send>, Output=FinishedObservation<Box<dyn Any + Send>>> + Send>> + 's> {
+    /// #        todo!()
+    /// #     }
+    ///
+    /// #     fn spawn_objsafe(&mut self, task: Task<Pin<Box<dyn Future<Output=Box<dyn Any + 'static + Send>> + 'static + Send>>, Box<dyn ObserverNotified<dyn Any + Send> + Send>>) -> Box<dyn Observer<Value=Box<dyn Any + Send>, Output=FinishedObservation<Box<dyn Any + Send>>> + Send> {
+    /// #         todo!()
+    /// #     }
+    /// # }
+    /// # let mut executor = MyExecutor;
     ///
     /// let builder = build_vec(100, Strategy::TasksPerCore(4), |i| i * i);
     /// let squares = builder.spawn_on(
     ///     &mut *executor,
-    ///     Priority::default(),
+    ///     Priority::unit_test(),
     ///     Hint::default()
     /// ).await;
     /// # }
